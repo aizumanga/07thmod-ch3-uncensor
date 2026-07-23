@@ -15,7 +15,7 @@ CUSTOM_METADATA_URL = (
     "https://github.com/aizumanga/07thmod-ch3-uncensor/releases/latest/"
     "download/installerMetadata.zip"
 )
-CUSTOM_SCRIPT_VERSION = "6.1.5-ch3u1"
+CUSTOM_SCRIPT_VERSION = "6.1.5-ch3u2"
 SPRITE_NAMES = ("sa_tn_bi_a1", "sa_tn_hn_a1", "sa_tn_sa_a1")
 
 
