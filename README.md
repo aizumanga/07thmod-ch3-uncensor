@@ -1,77 +1,117 @@
-# Higurashi Chapter 3 Original-Art Script Variant
+# Higurashi Chapter 3 Original-Art Variant
 
-This is a small overlay/build repository based on the official 07th-Mod
-**Tatarigoroshi v6.1.5** scripts. The installer itself does not own the scene
-scripts, so keeping this as a Chapter 3 package overlay avoids maintaining an
-unrelated full copy of `python-patcher`.
+> [!IMPORTANT]
+> This is an **unofficial, vibe-coded fork**. The installer infrastructure,
+> original mod, engine changes, scripts, voices, graphics packages, and nearly
+> all of the work used here were created and maintained by the
+> [07th-Mod team](https://github.com/07th-mod). This project only replaces the
+> Tatarigoroshi full-patch script package with a narrowly scoped variant.
 
-The build workflow checks out the pinned upstream release, applies only the
-files stored here, compiles the scripts using `higurashi-assembly`, and emits
-the same complete package format expected by the patcher. This preserves the
-current voice, ADV/NVL, lip-sync, art-set, audio, censorship, and
-installer-facing behavior.
+This repository combines the 07th-Mod `python-patcher` with a custom
+Tatarigoroshi Chapter 3 package. The alternate sprite calls are active only
+when both of these options are selected:
 
-The alternate calls in `Update/tata_013_02.txt` are enabled only when both
-conditions are true:
+- censorship level `0` (`GCensor == 0`);
+- **Original/Ryukishi art** (`GArtStyle == 2`).
 
-- censorship level is `0` (`GCensor == 0`);
-- the selected art set is **Original** (`GArtStyle == 2`).
+Every other censorship level and art set continues to use the upstream
+07th-Mod behavior. Steam/MangaGamer, console, and remake sprites are not
+replaced.
 
-Every other combination—including Console, Remake/Steam/MangaGamer graphics
-and censorship levels 1–5—uses the unchanged v6.1.5 calls.
+## Installation
 
-The three currently included files named `sa_tn_bi_a1`, `sa_tn_hn_a1`, and
-`sa_tn_sa_a1` are fully clothed placeholder sprites for integration testing.
-They deliberately share a known-good, safe original-art image until final
-non-explicit replacements are available.
+### Complete installer
 
-The older `tata_013_02.txt` supplied as a reference was used only to locate the
-nine historical call sites. It was not copied over the modern script.
+Download the installer for your operating system from this repository's
+[latest release](https://github.com/aizumanga/07thmod-ch3-uncensor/releases/latest).
+It installs the normal 07th-Mod components and downloads this repository's
+custom Chapter 3 script package in place of the upstream Tatarigoroshi script
+package.
 
-Run the repository-specific validation with:
+The installer UI deliberately retains the 07th-Mod identity because its
+infrastructure and almost all installed content are theirs. A prominent notice
+identifies this fork as unofficial and vibe-coded.
 
-```bash
-python3 tools/validate_ch3_patch.py
+### Manual update for an existing 07th-Mod installation
+
+If Chapter 3 is already patched with 07th-Mod, you do not need to reinstall it:
+
+1. Download `Tatarigoroshi.Voice.and.Graphics.Patch.zip` from the
+   [latest release](https://github.com/aizumanga/07thmod-ch3-uncensor/releases/latest).
+2. Close the game.
+3. Extract the archive into the **Tatarigoroshi game directory**, allowing it
+   to overwrite existing files.
+4. Start the game and select censorship level 0 plus Original/Ryukishi art.
+
+The archive uses the same layout as the upstream full script package. A later
+repair or reinstall performed with the official installer can restore the
+official script; reapply this package or run this forked installer if that
+happens.
+
+## Editing the custom sprites
+
+The editable source files are:
+
+- `chapter3-overlay/OGSprites/sa_tn_bi_a1.png`
+- `chapter3-overlay/OGSprites/sa_tn_hn_a1.png`
+- `chapter3-overlay/OGSprites/sa_tn_sa_a1.png`
+
+After installation, the active copies are in the Tatarigoroshi game directory:
+
+```text
+HigurashiEp03_Data/StreamingAssets/OGSprites/sa_tn_bi_a1.png
+HigurashiEp03_Data/StreamingAssets/OGSprites/sa_tn_hn_a1.png
+HigurashiEp03_Data/StreamingAssets/OGSprites/sa_tn_sa_a1.png
 ```
 
-Every push and pull request also compiles a complete package and stores it as a
-workflow artifact. A version tag creates a draft GitHub release.
+Keep each file as a `1280x960` PNG with the same filename. Editing the installed
+copies is convenient for quick testing; editing the files under
+`chapter3-overlay/OGSprites` is what changes future release packages.
 
-## Patcher integration
+## What is custom here
 
-Once a release asset is available from a URL that the installer can access,
-the matching `script` URL for **Tatarigoroshi Ch.3/full** in
-`python-patcher/installData.json` can point to this package. A private GitHub
-release is not directly downloadable by the unmodified patcher, so the
-repository must be public or the asset must be hosted at another public URL
-before end-user installer integration is enabled.
+- nine guarded call sites in
+  `chapter3-overlay/Update/tata_013_02.txt`;
+- three currently clothed placeholder sprites under
+  `chapter3-overlay/OGSprites`;
+- one Tatarigoroshi `full/script` URL in `installData.json`;
+- fork-specific metadata and release automation;
+- visible unofficial/vibe-coded notices in the GUI, terminal, documentation,
+  and release notes.
 
-## Upstream project information
+The custom script version is `6.1.5-ch3u1`. It intentionally differs from the
+upstream `6.1.5` value so an existing official installation is offered the
+custom script update.
 
-# PS3 Voice and Graphics Patch
-#### For Higurashi No Naku Koro Ni - Chapter 3 Tatarigoroshi
+## Validation and development
 
-> This repository **only** hosts the script files and a few voice files needed to fix bugs, check our [wiki](https://07th-mod.com/wiki/Higurashi/Higurashi-Getting-started) for instructions on how to install the patch!
+Run the fork checks with:
 
-This patch aims to combine the efforts of the ps3 voice patch and the ps3 sprites/background patch, and fill in missing voice files not covered by the original voice patch.
+```bash
+python3 chapter3-overlay/tools/validate_ch3_patch.py
+python3 tools/verify_fork_configuration.py
+```
 
-# Installing the patch
+Tags build the Chapter 3 package, Windows/Linux/macOS installers, and the
+fork-specific `installerMetadata.zip` into one draft GitHub release.
 
-> [Check our wiki](https://07th-mod.com/wiki/).
+The imported patcher revision is recorded in
+`UPSTREAM_PYTHON_PATCHER_COMMIT`. Use the **Import/update python-patcher**
+workflow to refresh it; the workflow reapplies the small patch stored in
+`fork-overrides/python-patcher.patch`.
 
-# Releases
+## Credits and status
 
-https://github.com/07th-mod/tatarigoroshi/releases/
+All credit for the patching infrastructure and original mod belongs to the
+[07th-Mod team](https://github.com/07th-mod), including the upstream
+[`python-patcher`](https://github.com/07th-mod/python-patcher) and
+[`tatarigoroshi`](https://github.com/07th-mod/tatarigoroshi) projects.
 
-This repository is in constant change. Sometimes new releases might get on hold until there is enough content to push a new patch. If the latest patch has a bug that seems to be already fixed in the repository, try downloading the master file. The master file will always have the latest files, regardless of the current release being outdated or not.
+This fork is unofficial and is not affiliated with or endorsed by 07th-Mod,
+07th Expansion, MangaGamer, or the Higurashi copyright holders. Fork-specific
+issues should be reported in this repository rather than to the 07th-Mod team.
 
-# Developing with us
-
-Usually, older contributors are welcome to join the repository and push their own changes without supervision. However, you can also aid the development just by forking the repository and working on your own changes. After you are done, commit the changes, make a pull request and if it's good enough, the changes will be merged. Both approaches are more than welcome!
-
-# Credits
-
-- @DoctorDiablo - For making the graphics mod
-- @enumag - For coding the new automation script
-- @Grelo - For inserting the CGs and weather sprites
-- Anon - For giving us the PS3 files and scripts
+This version was **vibe-coded with substantial AI assistance**. Its glue code,
+automation, documentation, and scoped script edits were produced through a
+ChatGPT/Codex-assisted workflow and checked with automated validation. See
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for provenance details.
