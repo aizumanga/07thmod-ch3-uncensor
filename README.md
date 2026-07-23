@@ -79,7 +79,7 @@ copies is convenient for quick testing; editing the files under
 - visible unofficial/vibe-coded notices in the GUI, terminal, documentation,
   and release notes.
 
-The custom script version is `6.1.5-ch3u1`. It intentionally differs from the
+The custom script version is `6.1.5-ch3u2`. It intentionally differs from the
 upstream `6.1.5` value so an existing official installation is offered the
 custom script update.
 
