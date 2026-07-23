@@ -7,6 +7,11 @@ on:
       - fork-overrides/**
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional tag for a draft release, for example v0.2.0
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -125,6 +130,8 @@ jobs:
 
       - name: Build Windows installer variants
         run: python travis_build_script.py
+        env:
+          GITHUB_REF: ${{ inputs.release_tag != '' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
 
       - name: Upload Windows builds
         uses: actions/upload-artifact@v4
@@ -157,6 +164,8 @@ jobs:
 
       - name: Build Linux and macOS installers
         run: python travis_build_script.py
+        env:
+          GITHUB_REF: ${{ inputs.release_tag != '' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
 
       - name: Download Chapter 3 package
         uses: actions/download-artifact@v4
@@ -212,7 +221,7 @@ jobs:
 
   release:
     name: Create draft release
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     needs: bundle
     runs-on: ubuntu-22.04
     permissions:
@@ -228,6 +237,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
+          tag_name: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
           body_path: release-bundle/RELEASE_NOTES.md
           files: |
             release-bundle/Higurashi.Ch3.Variant.Installer.Windows.exe
