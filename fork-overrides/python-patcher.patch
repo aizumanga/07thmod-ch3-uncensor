@@ -1,0 +1,1240 @@
+diff --git a/.github/workflows/build_and_release.yml b/.github/workflows/build_and_release.yml
+new file mode 100644
+index 0000000..2e76675
+--- /dev/null
++++ b/.github/workflows/build_and_release.yml
+@@ -0,0 +1,239 @@
++name: Validate, build, and release
++
++on:
++  push:
++  pull_request:
++  workflow_dispatch:
++
++permissions:
++  contents: read
++
++env:
++  UPSTREAM_TATARIGOROSHI_VERSION: v6.1.5
++  HIGURASHI_ASSEMBLY_COMMIT: bca7a64867d2a7e78a7deda52df4056a1e494bb7
++  HIGURASHI_RELEASE_COMMIT: 8fcf44b86c32d4661d7b867807ca88ed2efb35f1
++
++jobs:
++  validate:
++    name: Validate scope, metadata, and patcher
++    runs-on: ubuntu-22.04
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v4
++
++      - name: Set up Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: "3.8"
++
++      - name: Validate the Chapter 3 overlay
++        run: python3 chapter3-overlay/tools/validate_ch3_patch.py
++
++      - name: Validate fork configuration and credits
++        run: python3 tools/verify_fork_configuration.py
++
++      - name: Validate installer JSON schema
++        run: bash travis_validate_json.sh
++
++  chapter3_package:
++    name: Build custom Tatarigoroshi package
++    needs: validate
++    runs-on: ubuntu-22.04
++    steps:
++      - name: Force CRLF checkout for Higurashi scripts
++        run: git config --global core.autocrlf true
++
++      - name: Checkout
++        uses: actions/checkout@v4
++
++      - name: Checkout pinned upstream Tatarigoroshi
++        uses: actions/checkout@v4
++        with:
++          repository: 07th-mod/tatarigoroshi
++          ref: ${{ env.UPSTREAM_TATARIGOROSHI_VERSION }}
++          path: upstream
++
++      - name: Apply the Chapter 3 overlay
++        run: |
++          cp chapter3-overlay/Update/tata_013_02.txt upstream/Update/tata_013_02.txt
++          cp chapter3-overlay/OGSprites/sa_tn_bi_a1.png upstream/OGSprites/sa_tn_bi_a1.png
++          cp chapter3-overlay/OGSprites/sa_tn_hn_a1.png upstream/OGSprites/sa_tn_hn_a1.png
++          cp chapter3-overlay/OGSprites/sa_tn_sa_a1.png upstream/OGSprites/sa_tn_sa_a1.png
++
++      - name: Checkout pinned Higurashi assembly
++        uses: actions/checkout@v4
++        with:
++          repository: 07th-mod/higurashi-assembly
++          ref: ${{ env.HIGURASHI_ASSEMBLY_COMMIT }}
++          path: upstream/dll
++
++      - name: Compile DLL
++        run: msbuild /p:Configuration=Release
++        working-directory: upstream/dll
++
++      - name: Compile standalone script compiler
++        run: msbuild /p:Configuration=ScriptCompiler
++        working-directory: upstream/dll
++
++      - name: Record assembly revision
++        run: >-
++          git show --pretty="format:Commit: %H %d%nDate: %cs%n%n%B" --no-patch
++          > ./bin/Release/Assembly-CSharp.version.txt
++        working-directory: upstream/dll
++
++      - name: Prepare release compiler
++        run: mv upstream/dll/bin upstream/
++
++      - name: Build full script package
++        run: |
++          curl --fail --location --output deploy_higurashi.py \
++            "https://raw.githubusercontent.com/07th-mod/higurashi_release/${HIGURASHI_RELEASE_COMMIT}/deploy_higurashi/deploy_higurashi.py"
++          python deploy_higurashi.py tatarigoroshi
++          rm deploy_higurashi.py
++        working-directory: upstream
++
++      - name: Upload Chapter 3 package
++        uses: actions/upload-artifact@v4
++        with:
++          name: chapter3-package
++          path: upstream/output/Tatarigoroshi.Voice.and.Graphics.Patch.zip
++          if-no-files-found: error
++
++  windows_installer:
++    name: Build Windows installer
++    needs: validate
++    runs-on: windows-latest
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v4
++
++      - name: Set up Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: "3.8"
++
++      - name: Expose pinned Rust toolchain
++        run: cp ./install_loader/rust-toolchain.toml .
++
++      - name: Set up Rust
++        uses: actions-rust-lang/setup-rust-toolchain@v1
++        with:
++          cache-workspaces: install_loader
++
++      - name: Build Windows installer variants
++        run: python travis_build_script.py
++
++      - name: Upload Windows builds
++        uses: actions/upload-artifact@v4
++        with:
++          name: windows-installer
++          path: travis_installer_output/*.*
++          if-no-files-found: error
++
++  bundle:
++    name: Build Linux/macOS and release bundle
++    needs:
++      - validate
++      - chapter3_package
++      - windows_installer
++    runs-on: ubuntu-22.04
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v4
++
++      - name: Set up Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: "3.8"
++
++      - name: Download Windows builds
++        uses: actions/download-artifact@v4
++        with:
++          name: windows-installer
++          path: travis_installer_output
++
++      - name: Build Linux and macOS installers
++        run: python travis_build_script.py
++
++      - name: Download Chapter 3 package
++        uses: actions/download-artifact@v4
++        with:
++          name: chapter3-package
++          path: chapter3-package
++
++      - name: Download official dynamic metadata
++        run: |
++          curl --fail --location --output official-installerMetadata.zip \
++            https://github.com/07th-mod/python-patcher-metadata/releases/latest/download/installerMetadata.zip
++
++      - name: Build fork-specific metadata
++        run: |
++          python3 tools/build_custom_metadata.py \
++            --official-metadata official-installerMetadata.zip \
++            --package chapter3-package/Tatarigoroshi.Voice.and.Graphics.Patch.zip \
++            --output installerMetadata.zip
++
++      - name: Assemble clearly named release files
++        run: |
++          mkdir release-bundle
++          cp chapter3-package/Tatarigoroshi.Voice.and.Graphics.Patch.zip release-bundle/
++          cp installerMetadata.zip release-bundle/
++          cp travis_installer_output/07th-Mod.Installer.Windows.exe \
++            release-bundle/Higurashi.Ch3.Variant.Installer.Windows.exe
++          cp travis_installer_output/07th-Mod.Installer.Windows.SafeMode.exe \
++            release-bundle/Higurashi.Ch3.Variant.Installer.Windows.SafeMode.exe
++          cp travis_installer_output/07th-Mod.Installer.Windows.NoLauncher.zip \
++            release-bundle/Higurashi.Ch3.Variant.Installer.Windows.NoLauncher.zip
++          cp travis_installer_output/07th-Mod.Installer.linux.tar.gz \
++            release-bundle/Higurashi.Ch3.Variant.Installer.linux.tar.gz
++          cp travis_installer_output/07th-Mod.Installer.mac.zip \
++            release-bundle/Higurashi.Ch3.Variant.Installer.mac.zip
++          cp github_actions_changelog_template_generated.md release-bundle/RELEASE_NOTES.md
++          cd release-bundle
++          sha256sum \
++            Higurashi.Ch3.Variant.Installer.Windows.exe \
++            Higurashi.Ch3.Variant.Installer.Windows.SafeMode.exe \
++            Higurashi.Ch3.Variant.Installer.Windows.NoLauncher.zip \
++            Higurashi.Ch3.Variant.Installer.linux.tar.gz \
++            Higurashi.Ch3.Variant.Installer.mac.zip \
++            Tatarigoroshi.Voice.and.Graphics.Patch.zip \
++            installerMetadata.zip \
++            > SHA256SUMS.txt
++
++      - name: Upload complete release bundle
++        uses: actions/upload-artifact@v4
++        with:
++          name: release-bundle
++          path: release-bundle/*
++          if-no-files-found: error
++
++  release:
++    name: Create draft release
++    if: startsWith(github.ref, 'refs/tags/')
++    needs: bundle
++    runs-on: ubuntu-22.04
++    permissions:
++      contents: write
++    steps:
++      - name: Download release bundle
++        uses: actions/download-artifact@v4
++        with:
++          name: release-bundle
++          path: release-bundle
++
++      - name: Create draft release
++        uses: softprops/action-gh-release@v2
++        with:
++          draft: true
++          body_path: release-bundle/RELEASE_NOTES.md
++          files: |
++            release-bundle/Higurashi.Ch3.Variant.Installer.Windows.exe
++            release-bundle/Higurashi.Ch3.Variant.Installer.Windows.SafeMode.exe
++            release-bundle/Higurashi.Ch3.Variant.Installer.Windows.NoLauncher.zip
++            release-bundle/Higurashi.Ch3.Variant.Installer.linux.tar.gz
++            release-bundle/Higurashi.Ch3.Variant.Installer.mac.zip
++            release-bundle/Tatarigoroshi.Voice.and.Graphics.Patch.zip
++            release-bundle/installerMetadata.zip
++            release-bundle/SHA256SUMS.txt
++        env:
++          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+diff --git a/.github/workflows/test_and_deploy.yml b/.github/workflows/test_and_deploy.yml
+deleted file mode 100644
+index 6e0ef28..0000000
+--- a/.github/workflows/test_and_deploy.yml
++++ /dev/null
+@@ -1,197 +0,0 @@
+-# Useful Links
+-# Python with Github Actions: https://help.github.com/actions/language-and-framework-guides/using-python-with-github-actions
+-
+-name: Test and Deploy
+-
+-# Run this workflow on every push or pull request
+-on:
+-  push:
+-  pull_request:
+-  # workflow_dispatch:
+-  #   inputs:
+-  #     tag_name:
+-  #       description: 'Tag name for release'
+-  #       required: true
+-
+-# Uncomment to run this workflow only when a tag is pushed
+-# Can set custom wildcards instead of '*', like 'v*' for tags starting with v
+-# NOTE: Releases are only published on tags, see "Release" step below
+-#on:
+-#  push:
+-#    tags:
+-#      - '*'
+-
+-# Docs on sharing data between jobs (between VMs): https://help.github.com/en/actions/configuring-and-managing-workflows/persisting-workflow-data-using-artifacts#passing-data-between-jobs-in-a-workflow
+-jobs:
+-  # This job checks which files have changed, and skips building the installer if only the metadata has changed.
+-  # Modified from example at https://github.com/dorny/paths-filter#examples
+-  changes:
+-    runs-on: ubuntu-latest
+-    # Required permissions
+-    permissions:
+-      pull-requests: read
+-    # Set job outputs to values from filter step
+-    outputs:
+-      build-installer: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || steps.filter.outputs.build-installer }}
+-    steps:
+-    # Download the repository
+-    - uses: actions/checkout@v4
+-
+-    # For pull requests it's not necessary to checkout the code
+-    - uses: dorny/paths-filter@v3
+-      id: filter
+-      with:
+-        filters: |
+-          build-installer:
+-            - '!((installData.json)|(versionData.json)|(cachedDownloadSizes.json))'
+-
+-  # Windows Build
+-  windows_build:
+-    name: Windows Build
+-    needs: changes
+-    if: ${{ needs.changes.outputs.build-installer == 'true' }}
+-    runs-on: windows-latest
+-    strategy:
+-      matrix:
+-        python-version: [3.8]
+-    steps:
+-      # Download the repository
+-      - uses: actions/checkout@v4
+-
+-      # Setup python (Windows VM is Python 3.7 by default, we need at least Python 3.8)
+-      - name: Set up Python ${{ matrix.python-version }}
+-        uses: actions/setup-python@v5
+-        with:
+-          python-version: ${{ matrix.python-version }}
+-
+-      # To get around setup-rust-toolchain@v1 not detecting install_loader/rust-toolchain.toml
+-      # since it is in a subfolder, copy it out to the root directory
+-      - name: Copy rust-toolchain.toml for actions-rust-lang/setup-rust-toolchain
+-        run: cp ./install_loader/rust-toolchain.toml .
+-
+-      # Configure Rust for 32-bit builds
+-      #
+-      # NOTE: Refer to install_loader/rust-toolchain.toml for the installed toolchain and target architecture
+-      # Please use fixed versions of rust so that installs build consistently
+-      # (So they don't randomly trigger Windows Defender)
+-      #
+-      # CACHE NOTE: This action also provides Github Actions caching of rust builds (uses Swatinem/rust-cache internally)
+-      - name: Install and configure rust for 32-bit builds
+-        uses: actions-rust-lang/setup-rust-toolchain@v1
+-        with:
+-          cache-workspaces: install_loader
+-
+-      # Run Python Deploy Script
+-      # This also installs and scans .exe with virustotal on Windows (to try prevent .exe virus false positives)
+-      - name: Run Deploy Script
+-        run: python travis_build_script.py
+-
+-      # Run virus scan (only on tagged builds)
+-      - name: Run VirusTotal Scan
+-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' # only scan when releasing
+-        env:
+-          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+-        run: |
+-          pip install vt-py
+-          python virusTotalScan.py
+-
+-      # Upload Artifact
+-      - name: Upload Windows Build
+-        uses: actions/upload-artifact@v4
+-        with:
+-          name: windows-loader-exe
+-          path: travis_installer_output/*.*
+-          if-no-files-found: error
+-
+-  # Linux/Mac Build
+-  linux_mac_build:
+-    name: Linux and Mac Build
+-    if: ${{ always() }} # Always run this, even if windows_build or other tasks fail
+-    needs: [windows_build, changes]
+-    runs-on: ubuntu-latest
+-    strategy:
+-      matrix:
+-        python-version: [3.8]
+-
+-    steps:
+-      # Download the repository
+-      - uses: actions/checkout@v4
+-
+-      # Check which files have changed
+-      - uses: dorny/paths-filter@v3
+-        id: filter
+-        with:
+-          filters: |
+-            metadata-changed:
+-              - '**/*.json'
+-
+-      # Setup Python
+-      - name: Set up Python ${{ matrix.python-version }}
+-        uses: actions/setup-python@v5
+-        with:
+-          python-version: ${{ matrix.python-version }}
+-
+-      # Run JSON Validation script
+-      - name: Validate JSON
+-        if: steps.filter.outputs.metadata-changed == 'true'
+-        run: bash travis_validate_json.sh
+-
+-      # Build installMetadata.zip
+-      # Only run this if the JSON validation was successful, in case there is an error in one of the JSON files
+-      # NOTE: This PAT will expire periodically, but Github should send a reminder to renew it.
+-      - name: Trigger installMetadata.zip build in python-patcher-metadata repo
+-        if: github.ref == 'refs/heads/master' && steps.filter.outputs.metadata-changed == 'true'
+-        uses: benc-uk/workflow-dispatch@v1
+-        with:
+-          workflow: build.yml
+-          repo: 07th-mod/python-patcher-metadata
+-          # Required when using the `repo` option. Either a PAT or a token generated from the GitHub app or CLI
+-          token: "${{ secrets.PYTHON_PATCHER_METADATA_PAT }}"
+-          ref: main # this repo uses 'master', but the python-patcher-metadata uses 'main'
+-
+-      # Download Windows artifacts
+-      - name: Download all Windows .exe artifacts
+-        if: ${{ needs.changes.outputs.build-installer == 'true' }}
+-        uses: actions/download-artifact@v4
+-        with:
+-          name: windows-loader-exe
+-          path: travis_installer_output
+-
+-      # Run Python Deploy Script
+-      - name: Run Deploy Script
+-        if: ${{ needs.changes.outputs.build-installer == 'true' }}
+-        run: python travis_build_script.py
+-
+-      # Publish a release (tagged commits)
+-      # For more info on options see: https://github.com/softprops/action-gh-release
+-      - name: Release (tag)
+-        uses: softprops/action-gh-release@v1
+-        if: startsWith(github.ref, 'refs/tags/') # only publish tagged commits
+-        with:
+-          files: |
+-            travis_installer_output/*.tar.gz
+-            travis_installer_output/*.exe
+-            travis_installer_output/*.zip
+-          body_path: github_actions_changelog_template_generated.md
+-          draft: true
+-        env:
+-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+-
+-      # The next step allows to manually publish a release via the GitHub web UI,
+-      # without having to clone the repo and push a new tag.
+-
+-      - name: Release (manual)
+-        uses: softprops/action-gh-release@v1
+-        if: github.event_name == 'workflow_dispatch'
+-        with:
+-          files: |
+-            travis_installer_output/07th-Mod.Installer.mac.zip
+-            travis_installer_output/07th-Mod.Installer.linux.tar.gz
+-            travis_installer_output/07th-Mod.Installer.Windows.exe
+-            travis_installer_output/07th-Mod.Installer.Windows.NoAdmin.exe
+-            travis_installer_output/07th-Mod.Installer.Windows.SafeMode.exe
+-          body_path: github_actions_changelog_template_generated.md
+-          draft: true
+-          tag_name: ${{ github.event.inputs.tag_name }}
+-        env:
+-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+diff --git a/README.md b/README.md
+index f3d6ee3..a827f9a 100644
+--- a/README.md
++++ b/README.md
+@@ -1,122 +1,117 @@
+-# Python Patcher
++# Higurashi Chapter 3 Original-Art Variant
+ 
+-If you just want to install the mod, [**click here for the installer download page**](https://github.com/07th-mod/python-patcher/releases).
++> [!IMPORTANT]
++> This is an **unofficial, vibe-coded fork**. The installer infrastructure,
++> original mod, engine changes, scripts, voices, graphics packages, and nearly
++> all of the work used here were created and maintained by the
++> [07th-Mod team](https://github.com/07th-mod). This project only replaces the
++> Tatarigoroshi full-patch script package with a narrowly scoped variant.
+ 
+-This repository contains the mod installer, used for installing all 07th-mod mods. The installer is cross-platform and written in python.
++This repository combines the 07th-Mod `python-patcher` with a custom
++Tatarigoroshi Chapter 3 package. The alternate sprite calls are active only
++when both of these options are selected:
+ 
+-**The below information is for developers only.**
++- censorship level `0` (`GCensor == 0`);
++- **Original/Ryukishi art** (`GArtStyle == 2`).
+ 
+-## Common Installer tasks HOWTO
++Every other censorship level and art set continues to use the upstream
++07th-Mod behavior. Steam/MangaGamer, console, and remake sprites are not
++replaced.
+ 
+-### Updating landing page and mod page "update" banners
++## Installation
+ 
+-The HTML for the landing page and update banners for each mod is dynamically fetched from this github repo [https://github.com/07th-mod/python-patcher-metadata](https://github.com/07th-mod/python-patcher-metadata).
++### Complete installer
+ 
+-To update the html:
++Download the installer for your operating system from this repository's
++[latest release](https://github.com/aizumanga/07thmod-ch3-uncensor/releases/latest).
++It installs the normal 07th-Mod components and downloads this repository's
++custom Chapter 3 script package in place of the upstream Tatarigoroshi script
++package.
+ 
+- - Edit and save the appropriate HTML file
+- - Push the commit to the repo
+- - Wait for the release to be published automatically (normally takes 15-30 seconds)
++The installer UI deliberately retains the 07th-Mod identity because its
++infrastructure and almost all installed content are theirs. A prominent notice
++identifies this fork as unofficial and vibe-coded.
+ 
+-Currently only the landing page and Hou+ implement this updateable html function.
++### Manual update for an existing 07th-Mod installation
+ 
+-More detail is available in the `Readme.md` page on that repo.
++If Chapter 3 is already patched with 07th-Mod, you do not need to reinstall it:
+ 
+-## Python Development Environment Setup
++1. Download `Tatarigoroshi.Voice.and.Graphics.Patch.zip` from the
++   [latest release](https://github.com/aizumanga/07thmod-ch3-uncensor/releases/latest).
++2. Close the game.
++3. Extract the archive into the **Tatarigoroshi game directory**, allowing it
++   to overwrite existing files.
++4. Start the game and select censorship level 0 plus Original/Ryukishi art.
+ 
+-If you have no preference for IDE, I would recommend `Pycharm` as it will help reduce mistakes while you're writing your code. Please conform to the follwing guidelines:
++The archive uses the same layout as the upstream full script package. A later
++repair or reinstall performed with the official installer can restore the
++official script; reapply this package or run this forked installer if that
++happens.
+ 
+-- **Please use tabs, not spaces,** when editing the python code, and enable smart tabs if your editor supports them.
++## Editing the custom sprites
+ 
+-- **Ensure your code can run under both Python 2 and 3**. We are currently supporting Python 2 only for MacOS - we may remove this requirement in the future.
++The editable source files are:
+ 
+-Please note that pycharm will attempt to index files in the project folder - this may cause problems when you run
+-the installer from pycharm, as the installer may try to move a file Pycharm is currently reading, causing it to
+-fail (I have only seen this happen once).
++- `chapter3-overlay/OGSprites/sa_tn_bi_a1.png`
++- `chapter3-overlay/OGSprites/sa_tn_hn_a1.png`
++- `chapter3-overlay/OGSprites/sa_tn_sa_a1.png`
+ 
+-### Known issues with python dev environment
++After installation, the active copies are in the Tatarigoroshi game directory:
+ 
+-If the installer is stopped using the "Quit Installer" button while a download is in progress, aria2c will keep
+-downloading in the background (at least on Windows). Normally when running the installer on Windows, the launcher
+-will terminate the aria2c process using a Windows Job Object, but when running through an IDE this won't happen.
++```text
++HigurashiEp03_Data/StreamingAssets/OGSprites/sa_tn_bi_a1.png
++HigurashiEp03_Data/StreamingAssets/OGSprites/sa_tn_hn_a1.png
++HigurashiEp03_Data/StreamingAssets/OGSprites/sa_tn_sa_a1.png
++```
+ 
+-Force closing the script via the IDE does seem to kill the aria2c process, however.
++Keep each file as a `1280x960` PNG with the same filename. Editing the installed
++copies is convenient for quick testing; editing the files under
++`chapter3-overlay/OGSprites` is what changes future release packages.
+ 
+-## JSON Mod Definition
++## What is custom here
+ 
+-The patcher reads the file [installData.json](installData.json) to figure out what mods are available.  The spec for this file is defined as a `Codable` Swift struct in [JSONValidator.swift](JSONValidator/Sources/JSONValidator/JSONValidator.swift)
++- nine guarded call sites in
++  `chapter3-overlay/Update/tata_013_02.txt`;
++- three currently clothed placeholder sprites under
++  `chapter3-overlay/OGSprites`;
++- one Tatarigoroshi `full/script` URL in `installData.json`;
++- fork-specific metadata and release automation;
++- visible unofficial/vibe-coded notices in the GUI, terminal, documentation,
++  and release notes.
+ 
+-The validator will run automatically on every push, to check the `installData.json` is correctly formatted. Because the validator is quite strict, the validator will need to be updated if the `installData.json` format is changed.
++The custom script version is `6.1.5-ch3u1`. It intentionally differs from the
++upstream `6.1.5` value so an existing official installation is offered the
++custom script update.
+ 
+-## Developer Mode
++## Validation and development
+ 
+-The installer has a global variable called DEVELOPER_MODE, which controls how it behaves. Developer mode will be activated if an `installData.json` is found on disk adjacent to the install script. This will be the case if you clone the git repository, then run the script.
++Run the fork checks with:
+ 
+-In developer mode, the installer will prefer local files (on disk) if they are present, instead of remote files (from github). This mode will Specifically: 
++```bash
++python3 chapter3-overlay/tools/validate_ch3_patch.py
++python3 tools/verify_fork_configuration.py
++```
+ 
+-- `installData.json`
+-- `cachedDownloadSizes.json`
++Tags build the Chapter 3 package, Windows/Linux/macOS installers, and the
++fork-specific `installerMetadata.zip` into one draft GitHub release.
+ 
+-## Cached Download Sizes
++The imported patcher revision is recorded in
++`UPSTREAM_PYTHON_PATCHER_COMMIT`. Use the **Import/update python-patcher**
++workflow to refresh it; the workflow reapplies the small patch stored in
++`fork-overrides/python-patcher.patch`.
+ 
+-The Github repository contains a file called `cachedDownloadSizes.json` to allow the installer to calculate the size of a mod without having to query each download link. When the installer runs in normal mode, it downloads this file from Github each time the installer is run.
++## Credits and status
+ 
+-When the installer is run in developer mode, it checks that all URLs in `installData.json` are present in `cachedDownloadSizes.json` - if not the `cachedDownloadSizes.json` file is automatically regenerated. Please commit this `cachedDownloadSizes.json` to the git repository each time it changes.
++All credit for the patching infrastructure and original mod belongs to the
++[07th-Mod team](https://github.com/07th-mod), including the upstream
++[`python-patcher`](https://github.com/07th-mod/python-patcher) and
++[`tatarigoroshi`](https://github.com/07th-mod/tatarigoroshi) projects.
+ 
+-## HTTPGUI / Web Interface
+-
+-The web interface component is located in the httpGUI folder.
+-
+-It is setup as a npm package with `eslint`, such that you can install
+-the `eslint` plugin in Visual Studio Code and have code
+-style checks/syntax checks etc. applied.
+-
+-To setup the development environment:
+-
+-- Install `npm` (You may want to use [`nvm`](https://github.com/nvm-sh/nvm) or [`nvm-windows`](https://github.com/coreybutler/nvm-windows) to manage `npm` versions)
+-- Install `visual studio code`
+-- Install the `eslint` plugin for visual studio code (available in the marketplace)
+-- Open a terminal in the `httpGUI` subdirectory, then run `npm install`
+-- Open the httpGUI **folder** in Visual Studio Code. Just opening the file by itself won't work.
+-- You *might* get a huge number of warnings as the file will have CRLF
+-  line endings (I think this is fixed now?). To fix this,
+-  on the bottom right of the window, click where it says `CRLF`, then choose
+-  `LF`
+-
+-To use the plugin:
+-
+-- If you open the `httpGUI` folder, but no syntax highlighting appears, most likely you didn't run `npm install` earlier.
+-- When you get an error, move the text cursor to the end of the red squiggle
+-- A lightbulb icon will appear
+-- Click the lightbulb icon and you can automatically fix the issue
+-- Moving the mouse cursor over a red squiggle will explain the error
+-
+-## Safe Mode / Interactive Text Mode
+-
+-The installer contains an interactive text mode installer, which can be used by the end user if the graphical installer fails (this is different from the "command line interface").
+-
+-## Command line interface
+-
+-The installer also ships with an alternative command line interface
+-for advanced users. For instructions, please refer to [this section](https://07th-mod.com/wiki/Umineko/Umineko-Part-3a-Cross-Platform-Installer/#power-users) of the wiki.
+-
+-## Github Actions Setup
+-
+-It is HIGHLY recommended to use a linter when editing Github Actions .yml files - pycharm provides this functionality.
+-
+-Please read the comments in the `.github/workflows/test_and_deploy.yml` file for more information.
+-
+-### Compiling the Windows Loader
+-
+-The windows loader is not well documented. Please contact one of the dev team members if you have trouble building - it is more than likely there is an error in the instructions below, rather than somethign wrong on your end.
+-
+-The installer is mostly setup to build on travis - if you want to build locally, you'll need to do the following (WINDOWS ONLY):
+-
+-- Install Rust
+-- Download `7za.exe` (you may need to rename it to `7za.exe` if it is called `7z.exe`), and place it next to `travis_build_script.py` (or put 7za on your path)
+-- Open a command window
+-- In the command window, set the `TRAVIS_TAG` environment variable using `set TRAVIS_TAG=v9.9.9`
+-- Run `python travis_build_script.py win` (make sure to include the `win` part), **in the same command window**
+-
+-The built exe will be located in the `travis_installer_output` folder
++This fork is unofficial and is not affiliated with or endorsed by 07th-Mod,
++07th Expansion, MangaGamer, or the Higurashi copyright holders. Fork-specific
++issues should be reported in this repository rather than to the 07th-Mod team.
+ 
++This version was **vibe-coded with substantial AI assistance**. Its glue code,
++automation, documentation, and scoped script edits were produced through a
++ChatGPT/Codex-assisted workflow and checked with automated validation. See
++[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for provenance details.
+diff --git a/cachedDownloadSizes.json b/cachedDownloadSizes.json
+index 14334c6..319bb24 100644
+--- a/cachedDownloadSizes.json
++++ b/cachedDownloadSizes.json
+@@ -132,7 +132,7 @@
+     "https://github.com/07th-mod/ponscripter-umineko/releases/latest/download/umineko-windows-steam-answer.zip": 3830966,
+     "https://github.com/07th-mod/ponscripter-umineko/releases/latest/download/umineko-windows-steam-question.zip": 3830966,
+     "https://github.com/07th-mod/tatarigoroshi/releases/download/v0.5.2/Tatarigoroshi.Voice.Patch.v0.5.2.7z": 731694,
+-    "https://github.com/07th-mod/tatarigoroshi/releases/latest/download/Tatarigoroshi.Voice.and.Graphics.Patch.zip": 8906314,
++    "https://github.com/aizumanga/07thmod-ch3-uncensor/releases/latest/download/Tatarigoroshi.Voice.and.Graphics.Patch.zip": 9861447,
+     "https://github.com/07th-mod/tsumihoroboshi/releases/download/v0.1.0/Tsumihoroboshi.Voice.Patch.v0.1.0.7z": 630596,
+     "https://github.com/07th-mod/tsumihoroboshi/releases/latest/download/Tsumihoroboshi.Voice.and.Graphics.Patch.zip": 11700711,
+     "https://github.com/07th-mod/umineko-answer/raw/adv_mode_no_clickwait_fix/0.utf": 15326214,
+@@ -185,4 +185,4 @@
+     "https://github.com/wf1264/tsumihoroboshi-ru/releases/latest/download/tsumihoroboshi_ru_windows.7z": 65792189,
+     "https://github.com/wf1264/watanagashi-ru/releases/latest/download/watanagashi_ru_windows.7z": 27894433,
+     "https://raw.githubusercontent.com/07th-mod/umineko-saku/master/0.utf": 7500980
+-}
+\ No newline at end of file
++}
+diff --git a/common.py b/common.py
+index a7ea3f9..3a52cbe 100644
+--- a/common.py
++++ b/common.py
+@@ -129,7 +129,7 @@ def printErrorMessage(text):
+ class Globals:
+ 	# On startup, the installer will download a zip file containing the following files
+ 	# and extract them to the INSTALLER_META_DATA_FOLDER
+-	INSTALLER_META_DATA_ZIP_URL = "https://github.com/07th-mod/python-patcher-metadata/releases/latest/download/installerMetadata.zip"
++	INSTALLER_META_DATA_ZIP_URL = "https://github.com/aizumanga/07thmod-ch3-uncensor/releases/latest/download/installerMetadata.zip"
+ 	INSTALLER_META_DATA_FOLDER = "installerMetadata"
+ 	META_PATH__INSTALL_DATA = os.path.join(INSTALLER_META_DATA_FOLDER, "installData.json")
+ 	META_PATH__VERSION_DATA = os.path.join(INSTALLER_META_DATA_FOLDER, "versionData.json")
+@@ -1604,7 +1604,7 @@ def removeFileWithCheck(path, isEmptyFolder=False, failOk=False):
+ def getLatestInstallerVersion():
+ 	""" Fetches latest installer version from Github, like "v1.1.68" """
+ 	try:
+-		releases, error = getJSON('https://api.github.com/repos/07th-mod/python-patcher/releases?per_page=1', isURL=True)
++		releases, error = getJSON('https://api.github.com/repos/aizumanga/07thmod-ch3-uncensor/releases?per_page=1', isURL=True)
+ 		if error is not None:
+ 			raise error
+ 
+diff --git a/github_actions_changelog_template.md b/github_actions_changelog_template.md
+index 4b76364..60ddbc9 100644
+--- a/github_actions_changelog_template.md
++++ b/github_actions_changelog_template.md
+@@ -1,27 +1,49 @@
+-# Installation Instructions
++# Unofficial Higurashi Chapter 3 Original-Art Variant
+ 
+-- **Please download the installer to your computer, then run it - don't run directly from your browser**
+-- Please read the [Higurashi](https://07th-mod.com/wiki/Higurashi/Higurashi-Getting-started/) or [Umineko](https://07th-mod.com/wiki/Umineko/Umineko-Getting-started/) wiki sections for more information.
++> **Credit and status:** The installer infrastructure and original mod are the
++> work of the [07th-Mod team](https://github.com/07th-mod). This unofficial
++> fork only replaces the Tatarigoroshi full script package. This version was
++> **vibe-coded with substantial AI assistance** and is not endorsed by
++> 07th-Mod.
+ 
+-## Troubleshooting and Known Issues
++## Installation
+ 
+-- If you are having installer trouble, or the game does not run properly, follow the [**Support Checklist**](https://07th-mod.com/wiki/support-checklist/) to solve your problem
+-- **MacOS users may need to refresh the webpage (web GUI) if it does not load or seems to hang**.
++- Download the installer to your computer before running it.
++- Windows users should normally choose
++  `Higurashi.Ch3.Variant.Installer.Windows.exe`.
++- Linux and macOS builds are provided in the same release.
++- General Higurashi installation requirements remain those documented by the
++  [07th-Mod wiki](https://07th-mod.com/wiki/Higurashi/Higurashi-Getting-started/).
++- Report problems specific to this variant in the
++  [fork repository](https://github.com/aizumanga/07thmod-ch3-uncensor/issues),
++  not to the 07th-Mod team.
+ 
+-## Windows Installer Variants Explanation
++## Existing 07th-Mod installations
+ 
+-1. `07th-Mod.Installer.Windows.exe` (Requires Administrator)
+-    - Default Installer - **Try this first**.
+-2. `07th-Mod.Installer.Windows.SafeMode.exe` (Requires Administrator)
+-    - Use this if the installer does not start up. It uses a text-based interface for the launcher.
+-3. `07th-Mod.Installer.Windows.NoLauncher.zip` (No Administrator Required)
+-     - Use this if you cannot launch the above two .exes due to Antivirus, lack of Admin Priviledge, or crashes
+-     - You might need to install the [Visual C++ Redistributable (x86)](https://aka.ms/vs/16/release/vc_redist.x86.exe) ([linked from this page](https://support.microsoft.com/en-au/topic/the-latest-supported-visual-c-downloads-2647da03-1eea-4433-9aff-95f26a218cc0)), but most people will already have it.
+-     - Extract the `.zip` file to your desktop or downloads folder (NOT program files or the game root, as this may cause permissions issues)
+-     - Double click on the `install.bat` file.
+-        - A terminal will open, followed by a special page in your web browser (you use this webpage to install the mod).
+-        - If the `install.bat` does not work, close the terminal, then double click the `install_safe_mode.bat` for the text-only installer
++Users who already installed Chapter 3 with 07th-Mod may download
++`Tatarigoroshi.Voice.and.Graphics.Patch.zip` and extract it directly into the
++Tatarigoroshi game directory, allowing existing files to be overwritten. A
++full reinstall is not required.
+ 
+-## Important Changes
++## Scope
+ 
+-- put your changes here
++The alternate calls are limited to censorship level 0 plus Original/Ryukishi
++art. All other art and censorship combinations retain the upstream behavior.
++The three included custom assets are currently clothed placeholders.
++
++## Windows installer variants
++
++1. `Higurashi.Ch3.Variant.Installer.Windows.exe` — default; requires
++   administrator privileges.
++2. `Higurashi.Ch3.Variant.Installer.Windows.SafeMode.exe` — text-based launcher;
++   requires administrator privileges.
++3. `Higurashi.Ch3.Variant.Installer.Windows.NoLauncher.zip` — no launcher and
++   no administrator requirement; extract it outside Program Files and the game
++   directory, then run `install.bat`.
++
++## Provenance
++
++- 07th-Mod python-patcher: https://github.com/07th-mod/python-patcher
++- 07th-Mod Tatarigoroshi: https://github.com/07th-mod/tatarigoroshi
++- Fork source and notices:
++  https://github.com/aizumanga/07thmod-ch3-uncensor
+diff --git a/httpGUI/index.html b/httpGUI/index.html
+index 6db3f79..1251fa6 100644
+--- a/httpGUI/index.html
++++ b/httpGUI/index.html
+@@ -4,7 +4,7 @@
+     <head>
+ 		<link rel="icon" type="image/png" href="favicon.png" />
+         <meta charset="utf-8">
+-        <title>07th-Mod Installer Index</title>
++        <title>Unofficial Chapter 3 Variant — 07th-Mod Installer</title>
+         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+         <link href="css/themify-icons.css" rel="stylesheet" type="text/css" media="all" />
+         <link href="css/bootstrap.css" rel="stylesheet" type="text/css" media="all" />
+@@ -29,7 +29,7 @@
+ 					<p>If you're sure you have the latest version, click "Use Old Installer", and ignore this message.</p>
+ 					<p>Otherwise please go to the installer download page and make sure you have the latest version.</p>
+ 				</div>
+-				<a href="https://github.com/07th-mod/python-patcher/releases" target="_blank"><button type="button" class="btn">Go to installer download page</button></a>
++				<a href="https://github.com/aizumanga/07thmod-ch3-uncensor/releases" target="_blank"><button type="button" class="btn">Go to this fork's download page</button></a>
+ 				<button type="button" class="btn" style="border: grey;" v-on:click="clearModal()">Use old installer (not recommended)</button>
+ 			</modal>
+ 		</div>
+@@ -53,6 +53,22 @@
+ 		        </div>
+ 		    </nav>
+ 		</div>
++
++		<section class="section-small-padding bg-secondary">
++			<div class="container">
++				<div class="alert alert-warning" role="alert">
++					<h4><strong>Unofficial Chapter 3 variant</strong></h4>
++					<p>
++						The installer infrastructure and original mod are entirely the work of the
++						<a href="https://github.com/07th-mod" target="_blank">07th-Mod team</a>.
++						This fork only replaces the Tatarigoroshi full script package and was
++						<strong>vibe-coded with substantial AI assistance</strong>. It is not an
++						official 07th-Mod release.
++						<a href="https://github.com/aizumanga/07thmod-ch3-uncensor" target="_blank">Project details</a>.
++					</p>
++				</div>
++			</div>
++		</section>
+ 		
+ 		<div class="main-container">
+ 			<snack-bar></snack-bar>
+diff --git a/httpGUI/installer.html b/httpGUI/installer.html
+index a2579e2..7a378a8 100644
+--- a/httpGUI/installer.html
++++ b/httpGUI/installer.html
+@@ -4,7 +4,7 @@
+     <head>
+ 		<link id="favicon" rel="icon" type="image/png" href="favicon.png" />
+         <meta charset="utf-8">
+-        <title>07th-Mod Installer</title>
++        <title>Unofficial Chapter 3 Variant — 07th-Mod Installer</title>
+         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+         <link href="css/themify-icons.css" rel="stylesheet" type="text/css" media="all" />
+         <link href="css/bootstrap.css" rel="stylesheet" type="text/css" media="all" />
+@@ -64,6 +64,18 @@
+ 		    </nav>
+ 		</div>
+ 
++		<section class="section-small-padding bg-secondary">
++			<div class="container">
++				<div class="alert alert-warning" role="alert">
++					<strong>Unofficial, vibe-coded Chapter 3 variant.</strong>
++					Installer infrastructure and the original mod are the work of the
++					<a href="https://github.com/07th-mod" target="_blank">07th-Mod team</a>.
++					Only the Tatarigoroshi full script package is replaced.
++					<a href="https://github.com/aizumanga/07thmod-ch3-uncensor" target="_blank">Details</a>.
++				</div>
++			</div>
++		</section>
++
+ 		<div>
+ 			<snack-bar></snack-bar>
+ 			<section class="page-title page-title-4 bg-secondary">
+diff --git a/httpGUI/loading_screen.html b/httpGUI/loading_screen.html
+index 337a200..3fdef7c 100644
+--- a/httpGUI/loading_screen.html
++++ b/httpGUI/loading_screen.html
+@@ -4,7 +4,7 @@
+     <head>
+ 		<link id="favicon" rel="icon" type="image/png" href="favicon.png" />
+         <meta charset="utf-8">
+-        <title>07th-Mod Installer Loading Screen</title>
++        <title>Unofficial Chapter 3 Variant — 07th-Mod Installer</title>
+         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+         <link href="css/themify-icons.css" rel="stylesheet" type="text/css" media="all" />
+         <link href="css/bootstrap.css" rel="stylesheet" type="text/css" media="all" />
+@@ -51,6 +51,7 @@
+ 				<div class="col-md-1"></div>
+ 				<div class="col-md-10">
+ 					<h1>07th-Mod Installer</h1>
++					<p><strong>Unofficial, vibe-coded Chapter 3 variant</strong></p>
+ 					<h3>Please Wait...</h3>
+ 					<div id="terminal"><p>Terminal Output</p></div>
+ 					<input type="checkbox" id="autoscrollCheckbox" name="autoscrollCheckbox" checked>
+diff --git a/httpGUI/shutdown.html b/httpGUI/shutdown.html
+index c504c11..338ce92 100644
+--- a/httpGUI/shutdown.html
++++ b/httpGUI/shutdown.html
+@@ -4,7 +4,7 @@
+     <head>
+ 		<link id="favicon" rel="icon" type="image/png" href="favicon.png" />
+         <meta charset="utf-8">
+-        <title>07th-Mod Installer Shutdown</title>
++        <title>Unofficial Chapter 3 Variant — Installer Shutdown</title>
+         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+         <link href="css/themify-icons.css" rel="stylesheet" type="text/css" media="all" />
+         <link href="css/bootstrap.css" rel="stylesheet" type="text/css" media="all" />
+diff --git a/httpGUI/troubleshooting.html b/httpGUI/troubleshooting.html
+index e31212c..2c4e025 100644
+--- a/httpGUI/troubleshooting.html
++++ b/httpGUI/troubleshooting.html
+@@ -4,7 +4,7 @@
+     <head>
+ 		<link rel="icon" type="image/png" href="favicon.png" />
+         <meta charset="utf-8">
+-        <title>07th-Mod Installer</title>
++        <title>Unofficial Chapter 3 Variant — 07th-Mod Installer</title>
+         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+         <link href="css/themify-icons.css" rel="stylesheet" type="text/css" media="all" />
+         <link href="css/bootstrap.css" rel="stylesheet" type="text/css" media="all" />
+diff --git a/httpGUI/umineko-warning.html b/httpGUI/umineko-warning.html
+index 75461be..d5ea1c1 100644
+--- a/httpGUI/umineko-warning.html
++++ b/httpGUI/umineko-warning.html
+@@ -4,7 +4,7 @@
+ 	<head>
+ 		<link rel="icon" type="image/png" href="favicon.png" />
+ 		<meta charset="utf-8">
+-		<title>07th-Mod Installer Index</title>
++		<title>Unofficial Chapter 3 Variant — 07th-Mod Installer</title>
+ 		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+ 		<link href="css/themify-icons.css" rel="stylesheet" type="text/css" media="all" />
+ 		<link href="css/bootstrap.css" rel="stylesheet" type="text/css" media="all" />
+@@ -29,7 +29,7 @@
+ 					<p>If you're sure you have the latest version, click "Use Old Installer", and ignore this message.</p>
+ 					<p>Otherwise please go to the installer download page and make sure you have the latest version.</p>
+ 				</div>
+-				<a href="https://github.com/07th-mod/python-patcher/releases" target="_blank"><button type="button" class="btn">Go to installer download page</button></a>
++				<a href="https://github.com/aizumanga/07thmod-ch3-uncensor/releases" target="_blank"><button type="button" class="btn">Go to this fork's download page</button></a>
+ 				<button type="button" class="btn" style="border: grey;" v-on:click="clearModal()">Use old installer (not recommended)</button>
+ 			</modal>
+ 		</div>
+diff --git a/installData.json b/installData.json
+index 76b381b..8e8e879 100644
+--- a/installData.json
++++ b/installData.json
+@@ -184,7 +184,7 @@
+ 						{"name": "base","url":"https://github.com/07th-mod/patch-releases/releases/download/tatarigoroshi-v1.0/tatarigoroshi-base.7z.meta4",    "priority": 0},
+ 						{"name": "ui",      "url": null,                                                                  "priority": 0, "installOnRepair":  true},
+ 						{"name": "restore-bgm-se",      "url":"https://github.com/07th-mod/patch-releases/releases/download/mod-common-v1.0/MangaGamer-Question-BGM-SE-Restore.7z", "relativeExtractionPath": "HigurashiEp03_Data/StreamingAssets", "priority": 0, "requirementsList": ["skip-if-crc32:StreamingAssets/SE/wa_003.ogg:0F8F4B01"]},
+-						{"name": "script",              "url":"https://github.com/07th-mod/tatarigoroshi/releases/latest/download/Tatarigoroshi.Voice.and.Graphics.Patch.zip",                              "priority": 5, "installOnRepair":  true}
++						{"name": "script",              "url":"https://github.com/aizumanga/07thmod-ch3-uncensor/releases/latest/download/Tatarigoroshi.Voice.and.Graphics.Patch.zip",                              "priority": 5, "installOnRepair":  true}
+ 					],
+ 					"fileOverrides" : [
+ 						{"name": "ui",     "id": "ui-windows-5.4.0f1", "os": ["windows"],      "unity": "5.4.0f1", "url":"https://github.com/07th-mod/patch-releases/releases/download/tatarigoroshi-v1.0/Tatarigoroshi-UI_5.4.0f1_win.7z"},
+diff --git a/install_loader/src/installer_webview.rs b/install_loader/src/installer_webview.rs
+index 4c14fac..297000e 100644
+--- a/install_loader/src/installer_webview.rs
++++ b/install_loader/src/installer_webview.rs
+@@ -59,7 +59,7 @@ fn launch_inner(url: &str, data_directory: Option<PathBuf>, tx: Sender<EventLoop
+     tx.send(event_loop.create_proxy())?;
+ 
+     let window = WindowBuilder::new()
+-        .with_title("07th-Mod Installer")
++        .with_title("Unofficial Ch.3 Variant - 07th-Mod Installer")
+         .build(&event_loop)?;
+ 
+     let (window_position, window_size) = window_position_size(&window);
+@@ -141,4 +141,4 @@ fn window_position_size_inner(window: &Window) -> Result<(PhysicalPosition<i32>,
+     let new_pos_y = maximized_position.y + ((maximized_size.height - new_height) as i32 / 2);
+ 
+     Ok((PhysicalPosition::new(new_pos_x, new_pos_y), PhysicalSize::new(new_width, new_height)))
+-}
+\ No newline at end of file
++}
+diff --git a/install_loader/src/panic_handler.rs b/install_loader/src/panic_handler.rs
+index a28517d..a452601 100644
+--- a/install_loader/src/panic_handler.rs
++++ b/install_loader/src/panic_handler.rs
+@@ -64,7 +64,7 @@ fn get_short_crash_message(info: &PanicInfo) -> String {
+ 
+ Please help us by reporting the error and submitting the crash log
+  - on our Discord server: https://discord.gg/pf5VhF9
+- - or, as a Github issue: https://github.com/07th-mod/python-patcher/issues
++ - or, as a Github issue: https://github.com/aizumanga/07thmod-ch3-uncensor/issues
+ 
+ -----------Error Summary-----------
+ "#,
+@@ -103,7 +103,7 @@ pub fn fallback_installer_pause() -> Result<(), Box<dyn Error>> {
+ 			"
+ Please help us by taking a screenshot of the error and uploading it:
+ - on our Discord server: https://discord.gg/pf5VhF9
+-- or, as a Github issue: https://github.com/07th-mod/python-patcher/issues"
++- or, as a Github issue: https://github.com/aizumanga/07thmod-ch3-uncensor/issues"
+ 		);
+ 		pause("Press ENTER to quit the installer");
+ 		return Err(error);
+diff --git a/install_loader/src/ui.rs b/install_loader/src/ui.rs
+index c4d3821..eb3846e 100644
+--- a/install_loader/src/ui.rs
++++ b/install_loader/src/ui.rs
+@@ -723,7 +723,7 @@ impl ApplicationGUI for InstallerGUI {
+ 		}
+ 
+ 		// Main window containing the installer
+-		Window::new("07th-Mod Installer Launcher")
++		Window::new("Unofficial Ch.3 Variant - 07th-Mod Installer Launcher")
+ 			.position([0.0, 0.0], Condition::Always)
+ 			.size(self.ui_state.window_size, Condition::Always)
+ 			.no_decoration() //remove title bar etc. so it acts like the "Main" window of the program
+@@ -770,7 +770,7 @@ impl AppBuilder<InstallerGUI> for InstallerBuilder {
+ 	}
+ 
+ 	fn window_name(&self) -> String {
+-		format!("07th-Mod Installer Launcher [{}]", version::travis_tag())
++		format!("Unofficial Ch.3 Variant - 07th-Mod Installer Launcher [{}]", version::travis_tag())
+ 	}
+ 
+ 	fn build(&mut self) -> InstallerGUI {
+diff --git a/main.py b/main.py
+index 66e8d50..1b88d19 100644
+--- a/main.py
++++ b/main.py
+@@ -80,6 +80,17 @@ def installerCommonStartupTasks():
+ 	logger.setGlobalLogger(sys.stdout)
+ 	sys.stderr = logger.StdErrRedirector(sys.stdout)
+ 
++	print("""
++================================================================================
++UNOFFICIAL CHAPTER 3 VARIANT
++
++Installer infrastructure and the original mod are the work of the 07th-Mod
++team. This fork only replaces the Tatarigoroshi full script package and was
++vibe-coded with substantial AI assistance. It is not an official 07th-Mod
++release: https://github.com/aizumanga/07thmod-ch3-uncensor
++================================================================================
++""")
++
+ 	parser = argparse.ArgumentParser()
+ 
+ 	parser.add_argument(
+diff --git a/tools/build_custom_metadata.py b/tools/build_custom_metadata.py
+new file mode 100644
+index 0000000..bcf7ff1
+--- /dev/null
++++ b/tools/build_custom_metadata.py
+@@ -0,0 +1,73 @@
++#!/usr/bin/env python3
++"""Build the fork-specific installerMetadata.zip from official dynamic metadata."""
++
++from pathlib import Path
++from zipfile import ZIP_DEFLATED, ZipFile
++import argparse
++import json
++import tempfile
++
++
++ROOT = Path(__file__).resolve().parents[1]
++CUSTOM_PACKAGE_URL = (
++    "https://github.com/aizumanga/07thmod-ch3-uncensor/releases/latest/"
++    "download/Tatarigoroshi.Voice.and.Graphics.Patch.zip"
++)
++REQUIRED_OFFICIAL_FILE = "updates.json"
++
++
++def parse_args():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--official-metadata", type=Path, required=True)
++    parser.add_argument("--package", type=Path, required=True)
++    parser.add_argument("--output", type=Path, required=True)
++    return parser.parse_args()
++
++
++def main():
++    args = parse_args()
++    package_size = args.package.stat().st_size
++
++    with ZipFile(args.official_metadata) as official_zip:
++        names = {Path(name).name: name for name in official_zip.namelist()}
++        if REQUIRED_OFFICIAL_FILE not in names:
++            raise SystemExit(
++                "official metadata is missing {}".format(REQUIRED_OFFICIAL_FILE)
++            )
++        updates_json = official_zip.read(names[REQUIRED_OFFICIAL_FILE])
++
++    cached_sizes = json.loads(
++        (ROOT / "cachedDownloadSizes.json").read_text(encoding="utf-8")
++    )
++    cached_sizes[CUSTOM_PACKAGE_URL] = package_size
++
++    args.output.parent.mkdir(parents=True, exist_ok=True)
++    with tempfile.TemporaryDirectory(prefix="ch3-metadata-") as temp_dir:
++        temp_root = Path(temp_dir)
++        (temp_root / "installData.json").write_bytes(
++            (ROOT / "installData.json").read_bytes()
++        )
++        (temp_root / "versionData.json").write_bytes(
++            (ROOT / "versionData.json").read_bytes()
++        )
++        (temp_root / "cachedDownloadSizes.json").write_text(
++            json.dumps(cached_sizes, indent=4, sort_keys=True) + "\n",
++            encoding="utf-8",
++        )
++        (temp_root / "updates.json").write_bytes(updates_json)
++
++        with ZipFile(args.output, "w", ZIP_DEFLATED) as output_zip:
++            for filename in (
++                "installData.json",
++                "versionData.json",
++                "cachedDownloadSizes.json",
++                "updates.json",
++            ):
++                output_zip.write(temp_root / filename, filename)
++
++    print("Built {}".format(args.output))
++    print("Custom package size: {}".format(package_size))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/verify_fork_configuration.py b/tools/verify_fork_configuration.py
+new file mode 100644
+index 0000000..02116eb
+--- /dev/null
++++ b/tools/verify_fork_configuration.py
+@@ -0,0 +1,119 @@
++#!/usr/bin/env python3
++"""Verify that the installer fork remains narrowly scoped and clearly credited."""
++
++from pathlib import Path
++import json
++import sys
++
++
++ROOT = Path(__file__).resolve().parents[1]
++CUSTOM_PACKAGE_URL = (
++    "https://github.com/aizumanga/07thmod-ch3-uncensor/releases/latest/"
++    "download/Tatarigoroshi.Voice.and.Graphics.Patch.zip"
++)
++CUSTOM_METADATA_URL = (
++    "https://github.com/aizumanga/07thmod-ch3-uncensor/releases/latest/"
++    "download/installerMetadata.zip"
++)
++CUSTOM_SCRIPT_VERSION = "6.1.5-ch3u1"
++SPRITE_NAMES = ("sa_tn_bi_a1", "sa_tn_hn_a1", "sa_tn_sa_a1")
++
++
++def fail(errors, message):
++    errors.append(message)
++    print("ERROR: {}".format(message), file=sys.stderr)
++
++
++def find_mod(data, mod_name):
++    return next(mod for mod in data["mods"] if mod["name"] == mod_name)
++
++
++def find_submod(mod, submod_name):
++    return next(submod for submod in mod["submods"] if submod["name"] == submod_name)
++
++
++def find_version(data, target_id):
++    return next(item for item in data if item["id"] == target_id)
++
++
++def main():
++    errors = []
++
++    install_data = json.loads((ROOT / "installData.json").read_text(encoding="utf-8"))
++    tatarigoroshi = find_mod(install_data, "Tatarigoroshi Ch.3")
++    full = find_submod(tatarigoroshi, "full")
++    script_file = next(item for item in full["files"] if item["name"] == "script")
++    if script_file["url"] != CUSTOM_PACKAGE_URL:
++        fail(errors, "Tatarigoroshi full/script does not use the custom package URL")
++
++    serialized_install_data = json.dumps(install_data)
++    if serialized_install_data.count(CUSTOM_PACKAGE_URL) != 1:
++        fail(errors, "custom package URL must appear exactly once in installData.json")
++
++    version_data = json.loads((ROOT / "versionData.json").read_text(encoding="utf-8"))
++    full_version = find_version(version_data, "Tatarigoroshi Ch.3/full")
++    script_version = next(
++        item["version"] for item in full_version["files"] if item["id"] == "script"
++    )
++    if script_version != CUSTOM_SCRIPT_VERSION:
++        fail(errors, "custom script version must be {}".format(CUSTOM_SCRIPT_VERSION))
++
++    cached_sizes = json.loads(
++        (ROOT / "cachedDownloadSizes.json").read_text(encoding="utf-8")
++    )
++    if cached_sizes.get(CUSTOM_PACKAGE_URL, 0) <= 0:
++        fail(errors, "cachedDownloadSizes.json is missing the custom package")
++
++    common_text = (ROOT / "common.py").read_text(encoding="utf-8")
++    if CUSTOM_METADATA_URL not in common_text:
++        fail(errors, "common.py does not use the fork-specific metadata URL")
++    if "api.github.com/repos/aizumanga/07thmod-ch3-uncensor/releases" not in common_text:
++        fail(errors, "common.py does not check this fork for installer updates")
++
++    target_script = (
++        ROOT / "chapter3-overlay" / "Update" / "tata_013_02.txt"
++    ).read_text(encoding="utf-8-sig")
++    for sprite_name in SPRITE_NAMES:
++        if sprite_name not in target_script:
++            fail(errors, "{} is not referenced by the target script".format(sprite_name))
++        sprite_path = (
++            ROOT / "chapter3-overlay" / "OGSprites" / "{}.png".format(sprite_name)
++        )
++        if not sprite_path.is_file():
++            fail(errors, "missing source sprite {}".format(sprite_path.relative_to(ROOT)))
++
++    credit_sources = {
++        "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
++        "THIRD_PARTY_NOTICES.md": (ROOT / "THIRD_PARTY_NOTICES.md").read_text(
++            encoding="utf-8"
++        ),
++        "httpGUI/index.html": (ROOT / "httpGUI" / "index.html").read_text(
++            encoding="utf-8"
++        ),
++        "httpGUI/installer.html": (ROOT / "httpGUI" / "installer.html").read_text(
++            encoding="utf-8"
++        ),
++        "main.py": (ROOT / "main.py").read_text(encoding="utf-8"),
++        "github_actions_changelog_template.md": (
++            ROOT / "github_actions_changelog_template.md"
++        ).read_text(encoding="utf-8"),
++    }
++    for path, text in credit_sources.items():
++        lowered = text.lower()
++        if "07th-mod" not in lowered or "vibe-coded" not in lowered:
++            fail(errors, "{} must visibly credit 07th-Mod and disclose vibe-coding".format(path))
++
++    if errors:
++        print("\nFork configuration validation failed with {} error(s).".format(len(errors)))
++        return 1
++
++    print("Fork configuration validation passed.")
++    print("Custom package URL occurrences: 1")
++    print("Custom script version: {}".format(CUSTOM_SCRIPT_VERSION))
++    print("Editable source sprites: {}".format(len(SPRITE_NAMES)))
++    print("Credit surfaces checked: {}".format(len(credit_sources)))
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/versionData.json b/versionData.json
+index 648fd27..183c0b8 100644
+--- a/versionData.json
++++ b/versionData.json
+@@ -37,7 +37,7 @@
+ 		"id" : "Tatarigoroshi Ch.3/full",
+ 		"files":[
+ 			{"id": "base",                "version": "1.0.0"},
+-			{"id": "script",              "version": "6.1.5"},
++			{"id": "script",              "version": "6.1.5-ch3u1"},
+ 			{"id": "ui-windows-5.4.0f1",  "version": "1.3.0"},
+ 			{"id": "ui-windows-5.3.4p1",  "version": "1.3.0"},
+ 			{"id": "ui-windows-5.3.5f1",  "version": "1.3.0"},

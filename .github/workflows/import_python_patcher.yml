@@ -1,0 +1,109 @@
+name: Import/update python-patcher
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 07th-Mod/python-patcher branch, tag, or commit
+        required: false
+        default: master
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/import_python_patcher.yml
+      - fork-overrides/**
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: import-python-patcher
+  cancel-in-progress: false
+
+jobs:
+  import:
+    name: Import pinned upstream and apply fork patch
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve upstream revision
+        id: upstream
+        env:
+          REQUESTED_REF: ${{ github.event.inputs.upstream_ref }}
+        run: |
+          upstream_ref="${REQUESTED_REF:-260aa4bf731f90a05f669acd5609e9c6eda2b212}"
+          git clone --filter=blob:none --no-checkout \
+            https://github.com/07th-mod/python-patcher.git \
+            "$RUNNER_TEMP/python-patcher"
+          git -C "$RUNNER_TEMP/python-patcher" checkout "$upstream_ref"
+          upstream_commit="$(git -C "$RUNNER_TEMP/python-patcher" rev-parse HEAD)"
+          echo "commit=$upstream_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Preserve the existing Chapter 3 overlay
+        run: |
+          mkdir -p chapter3-overlay
+          if [[ -d Update && ! -e chapter3-overlay/Update ]]; then
+            git mv Update chapter3-overlay/Update
+          fi
+          if [[ -d OGSprites && ! -e chapter3-overlay/OGSprites ]]; then
+            git mv OGSprites chapter3-overlay/OGSprites
+          fi
+          if [[ -f tools/validate_ch3_patch.py && ! -e chapter3-overlay/tools ]]; then
+            git mv tools chapter3-overlay/tools
+          fi
+          if [[ -f UPSTREAM_VERSION && ! -e chapter3-overlay/UPSTREAM_VERSION ]]; then
+            git mv UPSTREAM_VERSION chapter3-overlay/UPSTREAM_VERSION
+          fi
+
+      - name: Restore a clean upstream patcher tree
+        run: |
+          git rm -r --ignore-unmatch tools
+          git rm --ignore-unmatch .github/workflows/build_and_release.yml
+          rsync -a --exclude=.git/ "$RUNNER_TEMP/python-patcher/" ./
+          rm -f .github/workflows/pr_compile_scripts.yml
+
+      - name: Apply the maintained fork patch
+        run: |
+          git apply --check fork-overrides/python-patcher.patch
+          git apply fork-overrides/python-patcher.patch
+          cp fork-overrides/THIRD_PARTY_NOTICES.md THIRD_PARTY_NOTICES.md
+          printf '%s\n' '${{ steps.upstream.outputs.commit }}' \
+            > UPSTREAM_PYTHON_PATCHER_COMMIT
+
+      - name: Validate imported source
+        run: |
+          python3 chapter3-overlay/tools/validate_ch3_patch.py
+          python3 tools/verify_fork_configuration.py
+          python3 -m py_compile \
+            common.py \
+            main.py \
+            tools/build_custom_metadata.py \
+            tools/verify_fork_configuration.py
+
+      - name: Commit imported source
+        id: commit
+        env:
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m "Import 07th-Mod python-patcher ${UPSTREAM_COMMIT:0:12}"
+          git push origin HEAD:main
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Start the complete validation build
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build_and_release.yml --ref main
