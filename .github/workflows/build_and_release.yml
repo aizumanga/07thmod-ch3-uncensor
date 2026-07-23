@@ -1,0 +1,242 @@
+name: Validate, build, and release
+
+on:
+  push:
+    paths-ignore:
+      - .github/workflows/**
+      - fork-overrides/**
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_TATARIGOROSHI_VERSION: v6.1.5
+  HIGURASHI_ASSEMBLY_COMMIT: bca7a64867d2a7e78a7deda52df4056a1e494bb7
+  HIGURASHI_RELEASE_COMMIT: 8fcf44b86c32d4661d7b867807ca88ed2efb35f1
+
+jobs:
+  validate:
+    name: Validate scope, metadata, and patcher
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+
+      - name: Validate the Chapter 3 overlay
+        run: python3 chapter3-overlay/tools/validate_ch3_patch.py
+
+      - name: Validate fork configuration and credits
+        run: python3 tools/verify_fork_configuration.py
+
+      - name: Validate installer JSON schema
+        run: bash travis_validate_json.sh
+
+  chapter3_package:
+    name: Build custom Tatarigoroshi package
+    needs: validate
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Force CRLF checkout for Higurashi scripts
+        run: git config --global core.autocrlf true
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned upstream Tatarigoroshi
+        uses: actions/checkout@v4
+        with:
+          repository: 07th-mod/tatarigoroshi
+          ref: ${{ env.UPSTREAM_TATARIGOROSHI_VERSION }}
+          path: upstream
+
+      - name: Apply the Chapter 3 overlay
+        run: |
+          cp chapter3-overlay/Update/tata_013_02.txt upstream/Update/tata_013_02.txt
+          cp chapter3-overlay/OGSprites/sa_tn_bi_a1.png upstream/OGSprites/sa_tn_bi_a1.png
+          cp chapter3-overlay/OGSprites/sa_tn_hn_a1.png upstream/OGSprites/sa_tn_hn_a1.png
+          cp chapter3-overlay/OGSprites/sa_tn_sa_a1.png upstream/OGSprites/sa_tn_sa_a1.png
+
+      - name: Checkout pinned Higurashi assembly
+        uses: actions/checkout@v4
+        with:
+          repository: 07th-mod/higurashi-assembly
+          ref: ${{ env.HIGURASHI_ASSEMBLY_COMMIT }}
+          path: upstream/dll
+
+      - name: Compile DLL
+        run: msbuild /p:Configuration=Release
+        working-directory: upstream/dll
+
+      - name: Compile standalone script compiler
+        run: msbuild /p:Configuration=ScriptCompiler
+        working-directory: upstream/dll
+
+      - name: Record assembly revision
+        run: >-
+          git show --pretty="format:Commit: %H %d%nDate: %cs%n%n%B" --no-patch
+          > ./bin/Release/Assembly-CSharp.version.txt
+        working-directory: upstream/dll
+
+      - name: Prepare release compiler
+        run: mv upstream/dll/bin upstream/
+
+      - name: Build full script package
+        run: |
+          curl --fail --location --output deploy_higurashi.py \
+            "https://raw.githubusercontent.com/07th-mod/higurashi_release/${HIGURASHI_RELEASE_COMMIT}/deploy_higurashi/deploy_higurashi.py"
+          python deploy_higurashi.py tatarigoroshi
+          rm deploy_higurashi.py
+        working-directory: upstream
+
+      - name: Upload Chapter 3 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: chapter3-package
+          path: upstream/output/Tatarigoroshi.Voice.and.Graphics.Patch.zip
+          if-no-files-found: error
+
+  windows_installer:
+    name: Build Windows installer
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+
+      - name: Expose pinned Rust toolchain
+        run: cp ./install_loader/rust-toolchain.toml .
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-workspaces: install_loader
+
+      - name: Build Windows installer variants
+        run: python travis_build_script.py
+
+      - name: Upload Windows builds
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: travis_installer_output/*.*
+          if-no-files-found: error
+
+  bundle:
+    name: Build Linux/macOS and release bundle
+    needs:
+      - validate
+      - chapter3_package
+      - windows_installer
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+
+      - name: Download Windows builds
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: travis_installer_output
+
+      - name: Build Linux and macOS installers
+        run: python travis_build_script.py
+
+      - name: Download Chapter 3 package
+        uses: actions/download-artifact@v4
+        with:
+          name: chapter3-package
+          path: chapter3-package
+
+      - name: Download official dynamic metadata
+        run: |
+          curl --fail --location --output official-installerMetadata.zip \
+            https://github.com/07th-mod/python-patcher-metadata/releases/latest/download/installerMetadata.zip
+
+      - name: Build fork-specific metadata
+        run: |
+          python3 tools/build_custom_metadata.py \
+            --official-metadata official-installerMetadata.zip \
+            --package chapter3-package/Tatarigoroshi.Voice.and.Graphics.Patch.zip \
+            --output installerMetadata.zip
+
+      - name: Assemble clearly named release files
+        run: |
+          mkdir release-bundle
+          cp chapter3-package/Tatarigoroshi.Voice.and.Graphics.Patch.zip release-bundle/
+          cp installerMetadata.zip release-bundle/
+          cp travis_installer_output/07th-Mod.Installer.Windows.exe \
+            release-bundle/Higurashi.Ch3.Variant.Installer.Windows.exe
+          cp travis_installer_output/07th-Mod.Installer.Windows.SafeMode.exe \
+            release-bundle/Higurashi.Ch3.Variant.Installer.Windows.SafeMode.exe
+          cp travis_installer_output/07th-Mod.Installer.Windows.NoLauncher.zip \
+            release-bundle/Higurashi.Ch3.Variant.Installer.Windows.NoLauncher.zip
+          cp travis_installer_output/07th-Mod.Installer.linux.tar.gz \
+            release-bundle/Higurashi.Ch3.Variant.Installer.linux.tar.gz
+          cp travis_installer_output/07th-Mod.Installer.mac.zip \
+            release-bundle/Higurashi.Ch3.Variant.Installer.mac.zip
+          cp github_actions_changelog_template_generated.md release-bundle/RELEASE_NOTES.md
+          cd release-bundle
+          sha256sum \
+            Higurashi.Ch3.Variant.Installer.Windows.exe \
+            Higurashi.Ch3.Variant.Installer.Windows.SafeMode.exe \
+            Higurashi.Ch3.Variant.Installer.Windows.NoLauncher.zip \
+            Higurashi.Ch3.Variant.Installer.linux.tar.gz \
+            Higurashi.Ch3.Variant.Installer.mac.zip \
+            Tatarigoroshi.Voice.and.Graphics.Patch.zip \
+            installerMetadata.zip \
+            > SHA256SUMS.txt
+
+      - name: Upload complete release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: release-bundle/*
+          if-no-files-found: error
+
+  release:
+    name: Create draft release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: bundle
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-bundle
+          path: release-bundle
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          body_path: release-bundle/RELEASE_NOTES.md
+          files: |
+            release-bundle/Higurashi.Ch3.Variant.Installer.Windows.exe
+            release-bundle/Higurashi.Ch3.Variant.Installer.Windows.SafeMode.exe
+            release-bundle/Higurashi.Ch3.Variant.Installer.Windows.NoLauncher.zip
+            release-bundle/Higurashi.Ch3.Variant.Installer.linux.tar.gz
+            release-bundle/Higurashi.Ch3.Variant.Installer.mac.zip
+            release-bundle/Tatarigoroshi.Voice.and.Graphics.Patch.zip
+            release-bundle/installerMetadata.zip
+            release-bundle/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

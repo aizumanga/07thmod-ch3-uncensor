@@ -64,9 +64,11 @@ jobs:
       - name: Restore a clean upstream patcher tree
         run: |
           git rm -r --ignore-unmatch tools
-          git rm --ignore-unmatch .github/workflows/build_and_release.yml
-          rsync -a --exclude=.git/ "$RUNNER_TEMP/python-patcher/" ./
-          rm -f .github/workflows/pr_compile_scripts.yml
+          rsync -a \
+            --exclude=.git/ \
+            --exclude=.github/workflows/ \
+            "$RUNNER_TEMP/python-patcher/" \
+            ./
 
       - name: Apply the maintained fork patch
         run: |
